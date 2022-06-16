@@ -1,8 +1,11 @@
 (ns wfc.core
   "Wave function collapse"
-  (:require [clojure.set :as set]
+  (:require 
+   [wfc.sample :as sample]
+   [clojure.set :as set]
             [clojure.spec.alpha :as s]
-            [clojure.math :as math]))
+            [clojure.math :as math]
+            ))
 
 
 (set! *warn-on-reflection* true)
@@ -20,74 +23,6 @@
 (s/def :wfc/sample (s/coll-of :wfc/sample-row :kind vector?))
 
 
-(defn- calculate-adjacencies
-  "Gather adjacency for tiles from `sample` for `direction1` and `direction2`."
-  [sample direction1 direction2]
-  (reduce
-   (fn [acc row]
-     (reduce
-      (fn [acc2 [el er]]
-        (-> acc2
-            (update-in [el direction1] set/union #{er})
-            (update-in [er direction2] set/union #{el})))
-      acc
-      (partition 2 1 row)))
-   {}
-   sample))
-
-
-(defn- transpose
-  "Transpose `sample` matrix."
-  [sample]
-  (apply (partial mapv vector) sample))
-
-
-(defn adjacency 
-  "Make a map of tile to left, right, up and down adjacent tile sets. "
-  [sample]
-  (merge-with
-   (partial merge-with conj)
-   (calculate-adjacencies sample :right :left)
-   (calculate-adjacencies (transpose sample) :down :up)))
-
-
-(defn weights
-  "Specific weight of the tile in the sample"
-  [sample]
-  (frequencies (flatten sample)))
-
-
-(defn superposition
-  "All possible sample tiles."
-  [sample]
-  (into #{} (flatten sample)))
-
-
-(defn analyze-sample
-  "Calculate sample's main parameters: adjacency, weight and superposition."
-  [sample]
-  {:adjacency (adjacency sample)
-   :weights (weights sample)
-   :superposition (superposition sample)})
-
-
-
-(defn analyze-samples
-  "Do analyze multiple samples and joins results."
-  [samples]
-  (reduce
-   (fn [res s]
-     (-> res
-         (update :adjacency #(merge-with
-                              (fn [r e] (merge-with into r e)) % (:adjacency s)))
-         (update :superposition #(into % (:superposition s)))
-         (update :weights #(merge-with + % (:weights s)))))
-   {:superposition #{}
-    :adjacency {}
-    :weights {}}
-   (map analyze-sample samples)))
-
-
 (defn entropy
   "Shannon's entropy"
   [variants weights]
@@ -101,7 +36,7 @@
 (defrecord Tile [r c collapsed? variants entropy index])
 
 ;; TODO get weights, variants from world and create new tile as world tile
-(defn new-tile 
+(defn new-tile
   "Create new tile"
   [r c variants weights]
   (->Tile r c false variants (entropy variants weights) [r c])
@@ -130,30 +65,7 @@
   "Search for the tile with lowest entropy"
   [world]
   (if (:lowest-entropy world)
-    (assoc (get-tile world (:lowest-entropy-coords world))
-           :index (:lowest-entropy-coords world))
-    (reduce
-     (fn [res el]
-       (if (or (nil? res) (< ^double (:entropy el) ^double (:entropy res)))
-         el
-         res))
-     nil
-     (filter
-      :entropy
-      (flatten
-       (map-indexed
-        (fn [i row]
-          (map-indexed (fn [j el]
-                         (assoc el :index [i j])) row))
-        (:state world)))))))
-
-(defn lowest-entropy-tile
-  "Search for the tile with lowest entropy"
-  [world]
-  (if (:lowest-entropy world)
     (get-tile world (:lowest-entropy-coords world))
-    #_(assoc (get-tile world (:lowest-entropy-coords world))
-           :index (:lowest-entropy-coords world))
     (reduce
      (fn [res el]
        (if (or (nil? res) (< ^double (:entropy el) ^double (:entropy res)))
@@ -163,15 +75,11 @@
      (filter
       :entropy
       (flatten
-       (:state world)
-       #_(map-indexed
-        (fn [i row]
-          (map-indexed (fn [j el]
-                         (assoc el :index [i j])) row))
-        (:state world)))))))
+       (:state world))))))
 
-
+;; TODO make position matter
 (defn new-world
+  "Build new `world`"
   [r c sample-analysis]
   (let [{:keys [adjacency weights superposition]} sample-analysis
         tile (new-tile 0 0 superposition weights)]
@@ -189,22 +97,31 @@
      :superposition superposition}))
 
 
-(defn adjacent-pos
+(defn adjacent-pos 
   "Get coordinates of adjacents tiles left, right, up and down."
-  [world ^long r ^long c]
+  ([world r c]
+   (adjacent-pos (:rows  world) (:cols world) r c))
+  ([^long rows ^long cols ^long r ^long c]
+   (let [left (dec c)
+         right (inc c)
+         up (dec r)
+         down (inc r)]
+     {:left (when (<= 0 left) [r left])
+      :right (when (< right cols) [r right])
+      :up (when (<= 0 up) [up c])
+      :down (when (< down rows) [down c])})))
+
+
+(defn adjacent-coords
+  [^long r ^long c ^long rows ^long cols]
   (let [left (dec c)
         right (inc c)
         up (dec r)
-        down (inc r)
-        {:keys [^long rows ^long cols]} world]
-    {:left (when (>= left 0) [r left])
-     :right (when (< right cols) [r right])
-     :up (when (>= up 0) [up c])
-     :down (when (< down rows) [down c])
-     :left-up (when (and (>= up 0) (>= left 0)) [up left])
-     :left-down (when (and (< down rows) (>= left 0)) [down left])
-     :right-up (when (and (>= up 0) (< right cols)) [up right])
-     :right-down (when (and (< down rows) (< right cols)) [down right])}))
+        down (inc r)]
+    [(when (<= 0 left) [r left])
+     (when (< right cols) [r right])
+     (when (<= 0 up) [up c])
+     (when (< down rows) [down c])]))
 
 
 (defn update-lowest-entropy
@@ -215,29 +132,27 @@
    (let [current-tile (get-tile world r c)
          ^double tile-entropy (:entropy current-tile)
          ^double lowest-entropy (:lowest-entropy world)]
-     ;(prn "ULE" lowest-entropy tile-entropy (< tile-entropy lowest-entropy))
      (cond
-       force? (assoc world
-                     :lowest-entropy tile-entropy
-                     :lowest-entropy-coords [r c])
+       force? 
+       (assoc world
+              :lowest-entropy tile-entropy 
+              :lowest-entropy-coords [r c])
+       
        (nil? tile-entropy) world
+       
        (and (nil? lowest-entropy) (some? tile-entropy))
        (assoc world
               :lowest-entropy tile-entropy
               :lowest-entropy-coords [r c])
-       (< tile-entropy lowest-entropy) (assoc world
-                                              :lowest-entropy tile-entropy
-                                              :lowest-entropy-coords [r c])
-       :else world)
-     #_(if (or (<= lowest-entropy 0)
-               (< tile-entropy lowest-entropy))
-         (assoc world
-                :lowest-entropy tile-entropy
-                :lowest-entropy-coords [r c])
-         world))))
+       
+       (< tile-entropy lowest-entropy)
+       (assoc world
+              :lowest-entropy tile-entropy
+              :lowest-entropy-coords [r c])
+       :else world))))
 
 
-(defn rand-weighted-choice
+(defn- rand-weighted-choice
   "Random key from weight map."
   [weights]
   (let [wsum (reduce + (vals weights))
@@ -255,65 +170,40 @@
 (defn random-weighted-variant
   "Select variant from possible `variants` according to weight."
   [variants weights]
-  ;(rand-nth (take 3 (reverse (sort-by #(get weights %) (seq (:variants tile))))))
-  #_(rand-nth (seq (:variants tile)))
   (rand-weighted-choice (select-keys weights variants)))
 
-
-(defn reduce-variants
-  "Reduce variability of the tile by given variant"
-  [tile variant weights]
-  (let [{:keys [variants collapsed?]} tile]
-    (if (or collapsed? (= 1 (count variants)))
-      tile
-      (let [new-variants (set/intersection variants variant)]
-        (if (empty? new-variants)
-          (do
-            (println "-UB-" tile variants variant)
-            (throw (ex-info "AAAA" {}))
-            (assoc tile :uncertain? true))
-          (assoc tile
-                 :variants new-variants
-                 :entropy (entropy new-variants weights)))))))
-
-(defn adjacency-of-variants
-  [variants adjacency]
-  (reduce 
-   (fn [res v]
-     (merge-with set/union res (get adjacency v)))
-   {:left #{}
-    :right #{}
-    :up #{}
-    :down #{}}
-   variants))
+(defn zero-entropy?
+  [tile]
+  (when tile
+    (when (set? (:variants tile))
+      (= 1 (count (:variants tile))))
+    #_(when-let [^double e (:entropy tile)]
+        (<= e 0))))
 
 
-;; (defn collapse 
-;;   "Collapse cell and reduce varability of it's adjacent tiles."
-;;   [world r c variant]
-;;   (let [{:keys [weights adjacency]} world
-;;         adj-pos (adjacent-pos world r c)
-;;         adj-tiles (get adjacency variant)
-;;         slightly-collapsed-world (-> world
-;;                                      (update-in [:state r c] collapse-tile variant)
-;;                                      (update-lowest-entropy r c true))]
-;;     (try
-;;       (reduce
-;;        (fn [w dir]
-;;          (if-let [dir-coords (get adj-pos dir)]
-;;            (let [[dr dc] dir-coords]
-;;              (-> w
-;;                  (update-in [:state dr dc] reduce-variants (get adj-tiles dir) weights)
-;;                  (update-lowest-entropy dr dc false)))
-;;            w))
-;;        slightly-collapsed-world
-;;        (shuffle [:left :right :up :down]))
-;;       (catch Exception e))))
-
-(defn update-tile-variants
-  [world r c tile update-fn]
-  (let [weights (:weights world)]
-    (update-in world [:state r c] reduce-variants tile weights)))
+(defn reduce-adjacent-variants
+  "Reduce variants of adjacent tiles"
+  [world adj-pos adj-tiles weights] 
+  (reduce
+   (fn [w dir]
+     (if-let [dir-coords (get adj-pos dir)]
+       (let [[dr dc] dir-coords
+             tile (get-tile world dr dc)
+             {:keys [variants collapsed?]} tile]
+         (if (or collapsed? (= 1 (count variants)))
+           w
+           (let [dir-variants (get adj-tiles dir)
+                 new-variants (set/intersection variants dir-variants)]
+             (if (empty? new-variants) 
+               (reduced nil)
+               (-> w
+                   (update-in [:state dr dc] assoc
+                              :variants new-variants
+                              :entropy (entropy new-variants weights))
+                   (update-lowest-entropy dr dc false))))))
+       w))
+   world
+   (shuffle [:left :right :up :down])))
 
 (defn collapse
   "Collapse cell and reduce varability of it's adjacent tiles."
@@ -328,32 +218,12 @@
             slightly-collapsed-world (-> world
                                          (update-in [:state r c] collapse-tile variant)
                                          (update-lowest-entropy r c true))
-            world'
-            (try
-              (reduce
-               (fn [w dir]
-                 (if-let [dir-coords (get adj-pos dir)]
-                   (let [[dr dc] dir-coords]
-                     (-> w
-                         (update-in [:state dr dc] reduce-variants (get adj-tiles dir) weights)
-                         (update-lowest-entropy dr dc false)))
-                   w))
-               slightly-collapsed-world
-               (shuffle [:left :right :up :down
-                         ;:left-up :left-down :right-up :right-down
-                         ]))
-              (catch Exception e))]
+            world' (reduce-adjacent-variants slightly-collapsed-world adj-pos adj-tiles weights)
+           ]
         (if world'
           world'
           (recur (set/difference vs #{variant})))))))
 
-(defn zero-entropy?
-  [tile]
-  (when tile
-    (when (set? (:variants tile))
-      (= 1 (count (:variants tile))))
-    #_(when-let [^double e (:entropy tile)]
-        (<= e 0))))
 
 ;; TODO progressive world weight
 
@@ -363,36 +233,19 @@
   ([world r c tile-variants]
    (let [;v (if (set? variant) (first variant) variant)
          world'  (collapse world r c tile-variants)
-         #_(loop [vs tile-variants]
-                  ;(println "====> " [r c] vs)
-                  (if (empty? vs)
-                    ;(collapse world r c nil)
-                    ;(throw (ex-info "WORLD FAILED" {}))
-                    (do ;(println "=============" [r c] vs)
-                        world)
-                    (let [v (select-variant vs (:weights world))
-                          www (collapse world r c v)]
-                      (if www
-                        www
-                        (recur (set/difference vs #{v}))))))
-         ;world' (collapse world r c v)
-         {:keys [left right up down
-                 left-up left-down right-up right-down]} (adjacent-pos world' r c)]
+         [left right up down] (adjacent-coords r c (:rows world') (:cols world'))]
      (reduce
       (fn [w dir-coords]
         (let [dir-tile (when dir-coords (get-tile w dir-coords))]
-          (if (zero-entropy? dir-tile)
-            (do
-              ;(prn "---" dir-coords (:variants dir-tile))
-              (collapse-adjacent w dir-coords (:variants dir-tile)))
-            (do
-              ;(prn "+++" dir-coords (:variants dir-tile))
-              w))))
+          (if (zero-entropy? dir-tile) 
+            (collapse-adjacent w dir-coords (:variants dir-tile))
+            w)))
       world'
-      (shuffle [left right up down left-up left-down right-up right-down])))))
+      (shuffle [left right up down])))))
 
 
 (defn collapse-world
+  "Collapse whole world to the certanity"
   ([world]
    (collapse-world world (constantly true)))
   ([world continue-fn]
@@ -419,15 +272,15 @@
   [tile]
   ;(print (str " " (count (:variants tile)) " "))
   (let [c (count (:variants tile))]
-        (print (case c
-                 0 "0️⃣"
-                 1 "1️⃣"
-                 2 "2️⃣"
-                 3 "3️⃣"
-                 4 "4️⃣"
-                 5 "5️⃣"
-                 6 "6️⃣"
-                 "⬜"))))
+    (print (case c
+             0 "0️⃣"
+             1 "1️⃣"
+             2 "2️⃣"
+             3 "3️⃣"
+             4 "4️⃣"
+             5 "5️⃣"
+             6 "6️⃣"
+             "⬜"))))
 
 
 (defn print-tile
@@ -450,7 +303,6 @@
 (defn entropy
   "Shannon's entropy"
   [variants weights]
-  ;(prn variants weights)
   (let [tile-weights (map #(get weights %) variants)
         ^double tile-weight-sum (reduce + tile-weights)]
     (-
@@ -459,22 +311,22 @@
         tile-weight-sum))))
 
 (let [{:keys [weights]}
-      (analyze-sample [[:🟫 :🟫 :🟫 :🟫]
+      (sample/analyze-sample [[:🟫 :🟫 :🟫 :🟫]
                        [:🟩 :🟫 :🟫 :🟩]
                        [:🟦 :🟩 :🟩 :🟦]
                        [:🟦 :🟦 :🟦 :🟦]])]
   (entropy [:🟦] weights))
 (comment
   (time
-   (let [s1 [[:🟩 :🌳 :🟩 :🟩 :🌳  :🟡 :🟡 :🟩]
-             [:🟩 :🟩 :🟩 :🟩 :🟡  :🟦 :🟨 :🟩]
+   (let [s1 [[:🟩 :🌳 :🟩 :🟩 :🌳  :🟩 :🟩 :🟩]
+             [:🟩 :🟩 :🟩 :🟩 :🟡  :🟡 :🟨 :🟩]
              [:🌳 :🌳 :🌳 :🟡 :🟦  :🟦 :🟨 :🌳]
              [:🌲 :🌲 :🌳 :🟡 :🟦  :🟦 :🏨 :🌳]
              [:🌳 :🌲 :🟩 :🟩 :🟡  :🟦 :🟨 :🌲]
              [:🌳 :🌳 :🟩 :🟡 :🟦  :🟦 :🟨 :🌳]
              [:🌾 :🌳 :🟩 :🟡 :🟦  :🟨 :🌾 :🟩]
-             [:🟩 :🌳 :🏡 :🟡 :🟨  :🟩 :🟩 :🟩]
-             [:🟩 :🟩 :🌳 :🟩 :🟩  :🟩 :🟩 :🟩]]
+             [:🟩 :🌳 :🏡 :🟡 :🟨  :🟨 :🟩 :🟩]
+             [:🟩 :🟩 :🌳 :🟩 :🌳  :🟩 :🟩 :🟩]]
          s2 [[:🟫 :🟫 :🟫 :🟫]
              [:🟩 :🟫 :🟫 :🟩]
              [:🟦 :🟩 :🟩 :🟦]
@@ -485,16 +337,19 @@
              [:🟩 :🟦 :🟦 :🟦]
              [:🟩 :🟦 :🌴 :🟦]
              [:🟩 :🟦 :🟦 :🟦]]
-         s6 [[:🌳 :🌳 :🌳 :🌳 ]
-             [:🌳 :🌲 :🌲 :🌳 ]
-             [:🌳 :🌲 :🌲 :🌳 ]
-             [:🌳 :🌳 :🌳 :🌳 ]]
-          s7 [[:🟦 :🟦 :🟦]
-              [:🟦 :🏝 :🟦]
-              [:🟦 :🟦 :🟦]]
-                   s8 [[:🟦 :🟦 :🟦]
-                       [:🟦 :🟨 :🟦]
-                       [:🟦 :🟦 :🟦]]
+         s6 [[:🌳 :🌳 :🌳 :🌳]
+             [:🌳 :🌲 :🌲 :🌳]
+             [:🌳 :🌲 :🌲 :🌳]
+             [:🌳 :🌳 :🌳 :🌳]]
+         s7 [[:🟦 :🟦 :🟦]
+             [:🟦 :🏝 :🟦]
+             [:🟦 :🟦 :🟦]]
+         s10 [[:🟩 :🟩 :🟩 :🟩 :🟩 :🟩]
+              [:🟩 :🟫 :🟫 :🟫 :🟫 :🟩]
+              [:🟩 :🟫 :🟨 :🟨 :🟫 :🟩]
+              [:🟩 :🟫 :🟨 :🟨 :🟫 :🟩]
+              [:🟩 :🟫 :🟫 :🟫 :🟫 :🟩]
+              [:🟩 :🟩 :🟩 :🟩 :🟩 :🟩]]
          s5 [[:A :A :A :A]
              [:A :A :A :A]
              [:A :A :A :A]
@@ -502,7 +357,7 @@
              [:C :B :B :C]
              [:C :B :B :C]
              [:C :B :B :C]]
-         w (new-world 45 45 (analyze-samples [s1 s6 s7]))]
+         w (new-world 25 25 (sample/analyze-samples [s1 s6 s7]))]
      (-> w
          ;(collapse-adjacent 0 0 [:🟫])
          ;(collapse-adjacent 1 1 [:🟨])
@@ -516,9 +371,8 @@
                             true))
       ;(collapse-adjacent 0 3 :🏡)
       ;(lowest-entropy-tile)
-        (print-world)
-         (println)
-         )
+         (print-world)
+         (println))
   ;(collapse-adjacent w 1 1 :🟩)
   ;(lowest-entropy-tile )
      )))
